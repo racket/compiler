@@ -609,7 +609,7 @@
 ;; placeholder for a `scope` decoded in a second pass:
 (struct encoded-scope (relative-id content) #:prefab)
 
-(define (decode-wrapped cp v)
+(define (decode-wrapped v)
   (let loop ([v v])
     (let-values ([(tamper-status v encoded-wraps esrcloc)
                   (match v
@@ -870,7 +870,7 @@
         [(marshalled) (read-marshalled (read-compact-number cp) cp)]
         [(stx)
          (let ([v (read-compact cp)])
-           (make-stx (decode-wrapped cp v)))]
+           (make-stx (decode-wrapped v)))]
         [(local local-unbox)
          (let ([c (read-compact-number cp)]
                [unbox? (eq? cpt-tag 'local-unbox)])
@@ -1158,12 +1158,12 @@
 
 ;; ----------------------------------------
 
-(define (decode-stxes v)
+(define (decode-stxes v
+                      [decode-ht (make-hasheq)]
+                      [srcloc-ht (make-hasheq)])
   ;; Walk `v` to find `stx-obj` instances and decode the `wrap` field.
   ;; We do this after building a graph from the input, and `decode-wrap`
   ;; preserves graph structure.
-  (define decode-ht (make-hasheq))
-  (define srcloc-ht (make-hasheq))
   (let walk ([p v])
     (match p
       [(compilation-top _ binding-namess pfx c)
@@ -1203,7 +1203,7 @@
        (struct-copy seq-for-syntax p
                     [prefix (walk pfx)])]
       [(stx-obj d w esrcloc _ _)
-       (define-values (srcloc props) (decode-srcloc+props esrcloc srcloc-ht))
+       (define-values (srcloc props) (decode-srcloc+props esrcloc srcloc-ht decode-ht))
        (struct-copy stx-obj p
                     [datum (walk d)]
                     [wrap (decode-wrap w decode-ht)]
@@ -1240,7 +1240,7 @@
 
 ;; ----------------------------------------
 
-(define (decode-srcloc+props esrcloc ht)
+(define (decode-srcloc+props esrcloc ht decode-ht)
   (define (norm v) (if (v . < . 0) #f v))
   (define p
     (hash-ref! ht
@@ -1265,9 +1265,38 @@
                                   #hasheq())])
                          (if (and esrcloc ((vector-length esrcloc) . > . 6))
                              (for/fold ([props props]) ([p (in-list (vector-ref esrcloc 6))])
-                               (hash-set props (car p) (cdr p)))
+                               (hash-set props (car p) (decode-prop (cdr p) ht decode-ht)))
                              props))))))
   (values (car p) (cdr p)))
+
+;; Properties can contain syntax objects, which need further decoding
+(define (decode-prop v ht decode-ht)
+  (cond
+   [(pair? v) (cons (decode-prop (car v) ht decode-ht)
+                    (decode-prop (cdr v) ht decode-ht))]
+   [(vector? v)
+    (if (vector-ref v 0)
+        (decode-stxes (decode-wrapped (vector-ref v 1)) decode-ht ht)
+        (apply
+         vector-immutable
+         (for/list ([v (in-vector v)]
+                    [pos (in-naturals)]
+                    #:when (positive? pos))
+           (decode-prop v ht decode-ht))))]
+   [(box? v)
+    (box-immutable (decode-prop (unbox v) ht decode-ht))]
+   [(hash? v)
+    (for/hash ([(k v) (in-hash v)])
+      (values (decode-prop k ht decode-ht)
+              (decode-prop v ht decode-ht)))]
+   [(prefab-struct-key v)
+    => (lambda (k)
+         (apply
+          make-prefab-struct 
+          k
+          (for/list ([v (in-list (struct->list v))])
+            (decode-prop v ht decode-ht))))]
+   [else v]))
 
 ;; ----------------------------------------
 

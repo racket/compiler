@@ -445,7 +445,7 @@
                                      (sort (for/list ([(k v) (in-hash props)]
                                                       #:unless (and f
                                                                     (eq? k 'paren-shape)))
-                                             (cons k v))
+                                             (cons k (encode-prop v out)))
                                            symbol<?
                                            #:key car))
                              (if f
@@ -474,6 +474,35 @@
                    [(armed) 2]))]
         [else
          (cons enc-datum e-wraps)]))]))
+
+;; Preserved-property values need encoding, because
+;; they can contain syntax objects
+(define (encode-prop v out)
+  (cond
+   [(stx-obj? v)
+    (vector #t (encode-stx-obj v out))]
+   [(pair? v) (cons (encode-prop (car v) out)
+                    (encode-prop (cdr v) out))]
+   [(vector? v)
+    (apply
+     vector-immutable
+     (cons #f
+           (for/list ([v (in-vector v)])
+             (encode-prop v out))))]
+   [(box? v)
+    (box-immutable (encode-prop (unbox v) out))]
+   [(hash? v)
+    (for/hash ([(k v) (in-hash v)])
+      (values (encode-prop k out)
+              (encode-prop v out)))]
+   [(prefab-struct-key v)
+    => (lambda (k)
+         (apply
+          make-prefab-struct 
+          k
+          (for/list ([v (in-list (cdr (vector->list (struct->vector v))))])
+            (encode-prop v out))))]
+   [else v]))
 
 (define-struct out (s
                     ;; The output port for writing bytecode.
